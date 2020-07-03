@@ -1,5 +1,6 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
 -- | Overlapping record field names are great, but you can rarely use the
 -- fields as accessor functions, because GHC complains about overlaps.
 -- OverloadedLabels to the rescue! With them GHC only complains about being
@@ -33,6 +34,7 @@
 -- @
 module Data.OverloadedLabels.TH
     ( generateLabels
+    , generateLabelsUnderscore
     ) where
 
 import Data.Maybe (catMaybes)
@@ -43,7 +45,28 @@ import Language.Haskell.TH
 
 -- | Generate IsLabel instances for all record fields of the given data type
 generateLabels :: Name -> Q [Dec]
-generateLabels name = reify name >>= \case
+generateLabels = generateLabelsWith GenerateSettings
+    { fieldRename = Just
+    }
+
+-- | Generate IsLabel instances for all record fields starting with the
+-- underscore. The generated labels don't have the starting underscore in them.
+-- Useful when mixing with lenses.
+generateLabelsUnderscore :: Name -> Q [Dec]
+generateLabelsUnderscore = generateLabelsWith GenerateSettings
+    { fieldRename = \x -> case x of
+        '_':rest -> Just rest
+        _        -> Nothing
+    }
+
+
+data GenerateSettings = GenerateSettings
+    { fieldRename :: String -> Maybe String -- ^ Nothing means don't rename
+    }
+
+
+generateLabelsWith :: GenerateSettings -> Name -> Q [Dec]
+generateLabelsWith GenerateSettings {fieldRename} name = reify name >>= \case
     TyConI (NewtypeD _ctx tname _tvars _kind (RecC _rname vars) _deriv)
         -> makeLabels (ConT tname) vars
 
@@ -59,13 +82,18 @@ generateLabels name = reify name >>= \case
         toRecordVars _             = Nothing
         --
         makeLabels :: Type -> [(Name, a, Type)] -> Q [Dec]
-        makeLabels tname vars = traverse (toInstance tname) vars
+        makeLabels tname vars = catMaybes <$> traverse (toInstance tname) vars
+        --
+        toInstance :: Type -> (Name, a, Type) -> Q (Maybe Dec)
         toInstance tname (labelName, _bang, labelType) =
             let className = ConT ''IsLabel
-                labelString = nameBase labelName
-                labelSymbol = LitT $ StrTyLit labelString
-                funcType = AppT (AppT ArrowT tname) labelType
-                instanceHead = AppT (AppT className labelSymbol) funcType
-                --
-                isLabelDec = FunD 'fromLabel [Clause [] (NormalB $ VarE labelName) []]
-            in pure $ InstanceD Nothing [] instanceHead [isLabelDec]
+            in case fieldRename . nameBase $ labelName of
+                Nothing -> reportWarning ("Skipping field " <> show labelName)
+                        >> pure Nothing
+                Just labelString ->
+                    let labelSymbol = LitT $ StrTyLit labelString
+                        funcType = AppT (AppT ArrowT tname) labelType
+                        instanceHead = AppT (AppT className labelSymbol) funcType
+                        --
+                        isLabelDec = FunD 'fromLabel [Clause [] (NormalB $ VarE labelName) []]
+                    in pure . Just $ InstanceD Nothing [] instanceHead [isLabelDec]
