@@ -67,13 +67,16 @@ data GenerateSettings = GenerateSettings
 
 generateLabelsWith :: GenerateSettings -> Name -> Q [Dec]
 generateLabelsWith GenerateSettings {fieldRename} name = reify name >>= \case
-    TyConI (NewtypeD _ctx tname _tvars _kind (RecC _rname vars) _deriv)
-        -> makeLabels (ConT tname) vars
+    TyConI (NewtypeD _ctx tname tvars _kind (RecC _rname vars) _deriv)
+        -> makeLabels (fullyApplied (ConT tname) tvars) vars
+--         -> makeLabels (ConT tname) vars
 
-    TyConI (DataD    _ctx tname _tvars _kind ctrs _deriv)
+    TyConI (DataD    _ctx tname tvars _kind ctrs _deriv)
         -> case catMaybes . map toRecordVars $ ctrs of
             [] -> fail "Expected data declaration with at least one record"
-            records -> concat <$> traverse (makeLabels (ConT tname)) records
+            records ->
+                let targetType = fullyApplied (ConT tname) tvars
+                in concat <$> traverse (makeLabels targetType) records
 
     _   -> fail "Expected record declaration"
 
@@ -97,3 +100,12 @@ generateLabelsWith GenerateSettings {fieldRename} name = reify name >>= \case
                         --
                         isLabelDec = FunD 'fromLabel [Clause [] (NormalB $ VarE labelName) []]
                     in pure . Just $ InstanceD Nothing [] instanceHead [isLabelDec]
+        --
+        fullyApplied :: Type -> [TyVarBndr] -> Type
+        fullyApplied t []         = t
+        fullyApplied t (var:vars) =
+            let t' = AppT t $ varAsType var
+            in fullyApplied t' vars
+--         fullyApplied baseType vars = foldl' AppT baseType $ map varAsType vars
+        varAsType (PlainTV name) = VarT name
+        varAsType (KindedTV name kind) = SigT (VarT name) kind
